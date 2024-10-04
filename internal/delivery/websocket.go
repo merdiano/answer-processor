@@ -22,7 +22,7 @@ type BroadcastMessage struct {
 }
 
 // NewWebSocketServer creates a new WebSocketServer instance.
-func NewWebSocketServer(logInstance *logger.Loggers) *WebSocketServer {
+func NewWebSocketServer(logInstance *logger.Loggers) Handler {
 	return &WebSocketServer{
 		clients:   make(map[*websocket.Conn]string),
 		broadcast: make(chan BroadcastMessage),

@@ -40,3 +40,9 @@ type RelayMessage struct {
 	Dst string `json:"dst"`
 	Msg string `json:"msg"`
 }
+
+type LotteryMessage struct {
+	LotteryID int64  `json:"lottery_id"`
+	Date      string `json:"date"`
+	Src       string `json:"src"`
+}

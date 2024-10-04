@@ -5,32 +5,34 @@ import (
 	"answers-processor/internal/domain"
 	publisher "answers-processor/internal/infrastructure/rabbitmq/publisher"
 	"answers-processor/internal/repository"
+	"answers-processor/internal/strategies"
 	"answers-processor/pkg/logger"
-	"answers-processor/pkg/utils"
 	"database/sql"
-	"encoding/json"
-	"strings"
-	"sync"
+
 	"time"
 )
 
 type Service struct {
 	DB          *sql.DB
-	Publisher   *publisher.RabbitmqPublisher
-	WSServer    *websocket.WebSocketServer
 	LogInstance *logger.Loggers
-	mu          sync.Mutex
+	strategies  map[string]strategies.ProcessingStrategy
 }
 
 const customDateFormat = "2006-01-02T15:04:05"
 
-func NewService(db *sql.DB, publisher *publisher.RabbitmqPublisher, wsServer *websocket.WebSocketServer, logInstance *logger.Loggers) *Service {
-	return &Service{
+func NewService(db *sql.DB, publisher publisher.MessagePublisher, wsServer websocket.Broadcaster, logInstance *logger.Loggers) *Service {
+	s := &Service{
 		DB:          db,
-		Publisher:   publisher,
-		WSServer:    wsServer,
 		LogInstance: logInstance,
+		strategies:  make(map[string]strategies.ProcessingStrategy),
 	}
+
+	// Initialize strategies
+	s.strategies["quiz"] = strategies.NewQuizStrategy(publisher, wsServer, db)
+	s.strategies["voting"] = strategies.NewVoteStrategy(publisher, wsServer, db)
+	s.strategies["shop"] = strategies.NewShopStrategy(publisher, wsServer, db)
+	s.strategies["lottery"] = strategies.NewLotteryStrategy(publisher, wsServer, db)
+	return s
 }
 
 func (s *Service) ProcessMessage(message domain.SMSMessage) {
@@ -45,253 +47,24 @@ func (s *Service) ProcessMessage(message domain.SMSMessage) {
 		return
 	}
 
-	s.mu.Lock()
 	clientID, err := repository.InsertClientIfNotExists(s.DB, message.Source)
-	s.mu.Unlock()
 	if err != nil {
 		s.LogInstance.ErrorLogger.Error("Failed to insert or find client", "error", err)
 		return
 	}
 
-	s.mu.Lock()
 	accountType, err := repository.GetAccountType(s.DB, message.Destination)
-	s.mu.Unlock()
 	if err != nil {
 		s.LogInstance.ErrorLogger.Error("Failed to get account type", "number", message.Destination)
 		return
 	}
 
-	switch accountType {
-	case "quiz":
-		s.processQuiz(clientID, message, parsedDate)
-	case "voting":
-		s.processVoting(clientID, message, parsedDate)
-	case "shop":
-		s.processShopping(clientID, message, parsedDate)
-	default:
+	if strategy, ok := s.strategies[accountType]; ok {
+		err = strategy.Process(clientID, message, parsedDate)
+		if err != nil {
+			s.LogInstance.ErrorLogger.Error(err.Error())
+		}
+	} else {
 		s.LogInstance.ErrorLogger.Error("Unknown account type", "account_type", accountType)
 	}
-}
-
-func (s *Service) processQuiz(clientID int64, message domain.SMSMessage, parsedDate time.Time) {
-	destination := message.Destination
-	text := message.Text
-
-	s.mu.Lock()
-	_, questions, questionIDs, quizID, err := repository.GetAccountAndQuestions(s.DB, destination, parsedDate)
-	s.mu.Unlock()
-	if err != nil {
-		s.LogInstance.ErrorLogger.Error("Failed to find quiz and questions", "error", err)
-		return
-	}
-
-	s.LogInstance.InfoLogger.Info("Quiz found", "quiz_id", quizID, "questions_count", len(questions))
-
-	s.mu.Lock()
-	scoredMap, err := repository.HasClientScoredBatch(s.DB, questionIDs, clientID)
-	s.mu.Unlock()
-	if err != nil {
-		s.LogInstance.ErrorLogger.Error("Failed to batch check if client has scored", "error", err)
-		return
-	}
-
-	for i := range questions {
-		questionID := questionIDs[i]
-		s.mu.Lock()
-		correctAnswers, err := repository.GetQuestionAnswers(s.DB, questionID)
-		s.mu.Unlock()
-		if err != nil {
-			s.LogInstance.ErrorLogger.Error("Failed to get question answers", "error", err)
-			continue
-		}
-
-		isCorrect := compareAnswers(correctAnswers, text)
-
-		s.mu.Lock()
-		serialNumber, err := repository.GetNextSerialNumber(s.DB, questionID)
-		s.mu.Unlock()
-		if err != nil {
-			s.LogInstance.ErrorLogger.Error("Failed to get next serial number", "error", err)
-			continue
-		}
-
-		var score int
-		serialNumberForCorrect := 0
-
-		if isCorrect && !scoredMap[questionID] {
-			s.mu.Lock()
-			serialNumberForCorrect, err = repository.GetNextSerialNumberForCorrect(s.DB, questionID)
-			s.mu.Unlock()
-			if err != nil {
-				s.LogInstance.ErrorLogger.Error("Failed to get next serial number for correct answers", "error", err)
-				continue
-			}
-
-			s.mu.Lock()
-			score, err = repository.GetQuestionScore(s.DB, questionID)
-			s.mu.Unlock()
-			if err != nil {
-				s.LogInstance.ErrorLogger.Error("Failed to get question score", "error", err)
-				continue
-			}
-
-			starredSrc := utils.StarMiddleDigits(message.Source)
-
-			correctAnswerMessage := domain.CorrectAnswerMessage{
-				Answer:                 text,
-				Score:                  score,
-				Date:                   parsedDate.Format(customDateFormat),
-				SerialNumber:           serialNumber,
-				SerialNumberForCorrect: serialNumberForCorrect,
-				StarredSrc:             starredSrc,
-				QuizID:                 quizID,
-				QuestionID:             questionID,
-			}
-			msg, _ := json.MarshalIndent(correctAnswerMessage, "", "    ")
-			s.WSServer.Broadcast(destination, msg)
-
-			s.LogInstance.InfoLogger.Info("Correct answer processed and broadcasted", "answer", correctAnswerMessage.Answer, "score", correctAnswerMessage.Score, "date", correctAnswerMessage.Date, "serial_number", correctAnswerMessage.SerialNumber, "serial_number_for_correct", correctAnswerMessage.SerialNumberForCorrect, "starred_src", correctAnswerMessage.StarredSrc, "quiz_id", correctAnswerMessage.QuizID, "question_id", correctAnswerMessage.QuestionID)
-		} else {
-			s.mu.Lock()
-			incorrectAnswerCount, err := repository.GetIncorrectAnswerCount(s.DB, questionID, clientID)
-			s.mu.Unlock()
-			if err != nil {
-				s.LogInstance.ErrorLogger.Error("Failed to get incorrect answer count", "error", err)
-				continue
-			}
-
-			if incorrectAnswerCount == 0 {
-				score = 0 // Record the first incorrect answer without score
-				s.LogInstance.InfoLogger.Info("First incorrect answer recorded", "question_id", questionID, "client_id", clientID)
-			} else {
-				s.LogInstance.InfoLogger.Info("Repeated incorrect answer ignored", "question_id", questionID, "client_id", clientID)
-				continue
-			}
-		}
-
-		s.mu.Lock()
-		err = repository.InsertAnswer(s.DB, questionID, text, parsedDate, clientID, score, serialNumber, serialNumberForCorrect)
-		s.mu.Unlock()
-		if err != nil {
-			s.LogInstance.ErrorLogger.Error("Failed to insert answer", "error", err)
-			continue
-		}
-		s.LogInstance.InfoLogger.Info("Answer inserted", "question_id", questionID, "is_correct", isCorrect, "serial_number", serialNumber, "serial_number_for_correct", serialNumberForCorrect)
-	}
-}
-
-func (s *Service) processVoting(clientID int64, message domain.SMSMessage, parsedDate time.Time) {
-	s.mu.Lock()
-	votingID, status, err := repository.GetVotingDetails(s.DB, message.Destination, parsedDate)
-	s.mu.Unlock()
-	if err != nil {
-		s.LogInstance.ErrorLogger.Error("Failed to find voting by short number and date", "error", err)
-		return
-	}
-
-	s.mu.Lock()
-	votingItemID, votingItemTitle, err := repository.GetVotingItemDetails(s.DB, votingID, message.Text)
-	s.mu.Unlock()
-	if err != nil {
-		s.LogInstance.ErrorLogger.Error("Failed to find voting item by vote code", "error", err)
-		return
-	}
-
-	s.mu.Lock()
-	hasVoted, err := repository.HasClientVoted(s.DB, votingID, clientID, status, parsedDate)
-	s.mu.Unlock()
-	if err != nil {
-		s.LogInstance.ErrorLogger.Error("Failed to check if client has voted", "error", err)
-		return
-	}
-	if hasVoted {
-		return
-	}
-
-	s.mu.Lock()
-	err = repository.InsertVotingMessageAndUpdateCount(s.DB, votingID, votingItemID, message.Text, parsedDate, clientID)
-	s.mu.Unlock()
-	if err != nil {
-		s.LogInstance.ErrorLogger.Error("Failed to insert voting message and update count", "error", err)
-		return
-	}
-
-	smsText := votingItemTitle + " ucin beren sesiniz kabul edildi"
-	err = s.Publisher.SendMessage(message.Destination, message.Source, smsText)
-	if err != nil {
-		s.LogInstance.ErrorLogger.Error("Failed to send message notification", "error", err)
-	} else {
-		s.LogInstance.InfoLogger.Info("Message notification sent successfully", "to", message.Source)
-	}
-
-	votingMessage := domain.VotingMessage{
-		VotingID:     votingID,
-		VotingItemID: votingItemID,
-		ClientID:     clientID,
-		Message:      message.Text,
-		Date:         parsedDate.Format(customDateFormat),
-	}
-	msg, _ := json.MarshalIndent(votingMessage, "", "    ")
-	s.WSServer.Broadcast(message.Destination, msg)
-
-	s.LogInstance.InfoLogger.Info("Voting message processed and broadcasted", "voting_id", votingID, "voting_item_id", votingItemID, "client_id", clientID, "message", message.Text, "date", parsedDate.Format(customDateFormat))
-}
-
-func (s *Service) processShopping(clientID int64, message domain.SMSMessage, parsedDate time.Time) {
-	s.mu.Lock()
-	lotID, description, err := repository.GetLotDetailsByShortNumber(s.DB, message.Destination, parsedDate)
-	s.mu.Unlock()
-	if err != nil {
-		s.LogInstance.ErrorLogger.Error("Failed to find lot by short number and date", "error", err)
-		return
-	}
-
-	s.mu.Lock()
-	err = repository.InsertLotMessageAndUpdate(s.DB, lotID, message.Text, parsedDate, clientID)
-	s.mu.Unlock()
-	if err != nil {
-		s.LogInstance.ErrorLogger.Error("Failed to insert lot SMS message and update", "error", err)
-		return
-	}
-
-	s.LogInstance.InfoLogger.Info("Message recorded successfully", "lot_id", lotID, "client_id", clientID)
-
-	// Send message notification
-	err = s.Publisher.SendMessage(message.Destination, message.Source, description)
-	if err != nil {
-		s.LogInstance.ErrorLogger.Error("Failed to send message notification", "error", err)
-	} else {
-		s.LogInstance.InfoLogger.Info("Message notification sent successfully", "to", message.Source)
-	}
-
-	// Broadcast to WebSocket
-	shoppingMessage := domain.ShoppingMessage{
-		LotID:    lotID,
-		ClientID: clientID,
-		Message:  message.Text,
-		Date:     parsedDate.Format(customDateFormat),
-		Src:      message.Source,
-	}
-	msg, _ := json.MarshalIndent(shoppingMessage, "", "    ")
-	s.WSServer.Broadcast(message.Destination, msg)
-
-	s.LogInstance.InfoLogger.Info("Shopping message processed and broadcasted", "lot_id", lotID, "client_id", clientID, "message", message.Text, "date", parsedDate.Format(customDateFormat))
-}
-
-func compareAnswers(correctAnswers []string, userAnswer string) bool {
-	userAnswer = sanitizeAnswer(userAnswer)
-	for _, correctAnswer := range correctAnswers {
-		if sanitizeAnswer(correctAnswer) == userAnswer {
-			return true
-		}
-	}
-	return false
-}
-
-func sanitizeAnswer(answer string) string {
-	parts := strings.Split(answer, ",")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
-	}
-	return strings.ToLower(strings.Join(parts, ","))
 }

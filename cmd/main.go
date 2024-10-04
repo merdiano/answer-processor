@@ -95,7 +95,7 @@ func main() {
 	handleGracefulShutdown(rabbitmqConsumer, rabbitmqPublisher, wsServer, logInstance)
 }
 
-func handleGracefulShutdown(rabbitmqConsumer *consumer.RabbitMQConsumer, rabbitmqPublisher *publisher.RabbitmqPublisher, wsServer *websocket.WebSocketServer, logInstance *logger.Loggers) {
+func handleGracefulShutdown(rabbitmqConsumer *consumer.RabbitMQConsumer, rabbitmqPublisher publisher.MessagePublisher, wsServer websocket.Handler, logInstance *logger.Loggers) {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
