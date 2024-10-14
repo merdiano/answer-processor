@@ -1,15 +1,12 @@
 package repository
 
 import (
-	"answers-processor/pkg/logger"
 	"database/sql"
 
 	// "errors"
 	// "strings"
 	"time"
 )
-
-var loggers *logger.Loggers
 
 type QuestionScoringInfo struct {
 	ID                         int64  // Question ID
@@ -22,10 +19,11 @@ type QuestionScoringInfo struct {
 	NextSerialNumberForCorrect int // The next serial number for correct answers
 }
 
-func Init(logInstance *logger.Loggers) {
-	loggers = logInstance
+type QuizRepository struct {
+	DB *sql.DB
 }
-func GetQuestionAndScoringInfo(db *sql.DB, shortNumber string, currentDateTime time.Time, clientID int64) (*QuestionScoringInfo, error) {
+
+func (qr *QuizRepository) GetQuestionAndScoringInfo(shortNumber string, currentDateTime time.Time, clientID int64) (*QuestionScoringInfo, error) {
 	query := `
 		SELECT 
 			q.id, 
@@ -59,7 +57,7 @@ func GetQuestionAndScoringInfo(db *sql.DB, shortNumber string, currentDateTime t
 	var result QuestionScoringInfo
 	var hasScoredInt, hasMistakeInt int
 
-	err := db.QueryRow(query, clientID, clientID, shortNumber, currentDateTime, currentDateTime).Scan(
+	err := qr.DB.QueryRow(query, clientID, clientID, shortNumber, currentDateTime, currentDateTime).Scan(
 		&result.ID, &result.QuizID, &result.Answer, &result.Score, &hasScoredInt, &hasMistakeInt, &result.NextSerialNumber, &result.NextSerialNumberForCorrect,
 	)
 
@@ -73,17 +71,17 @@ func GetQuestionAndScoringInfo(db *sql.DB, shortNumber string, currentDateTime t
 	return &result, nil
 }
 
-func InsertAnswer(db *sql.DB, questionID int64, msg string, dt time.Time, clientID int64, score int, serialNumber int, serialNumberForCorrect int) error {
-	_, err := db.Exec(
+func (qr *QuizRepository) InsertAnswer(questionID int64, msg string, dt time.Time, clientID int64, score int, serialNumber int, serialNumberForCorrect int) error {
+	_, err := qr.DB.Exec(
 		"INSERT INTO answers (question_id, msg, dt, client_id, score, quiz_id, serial_number, serial_number_for_correct) VALUES (?, ?, ?, ?, ?, (SELECT quiz_id FROM questions WHERE id = ?), ?, ?)",
 		questionID, msg, dt, clientID, score, questionID, serialNumber, serialNumberForCorrect,
 	)
 	return err
 }
 
-func GetIncorrectAnswerCount(db *sql.DB, questionID, clientID int64) (int, error) {
+func (qr *QuizRepository) GetIncorrectAnswerCount(questionID, clientID int64) (int, error) {
 	var count int
-	err := db.QueryRow("SELECT COUNT(*) FROM answers WHERE question_id = ? AND client_id = ? AND score = 0", questionID, clientID).Scan(&count)
+	err := qr.DB.QueryRow("SELECT COUNT(*) FROM answers WHERE question_id = ? AND client_id = ? AND score = 0", questionID, clientID).Scan(&count)
 	if err != nil {
 		return 0, err
 	}

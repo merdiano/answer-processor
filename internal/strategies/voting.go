@@ -5,7 +5,6 @@ import (
 	"answers-processor/internal/domain"
 	"answers-processor/internal/infrastructure/rabbitmq/publisher"
 	"answers-processor/internal/repository"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,38 +14,38 @@ import (
 type VoteStrategy struct {
 	publisher   publisher.MessagePublisher
 	broadcaster websocket.Broadcaster
-	db          *sql.DB
+	repo        *repository.VotingRepository
 }
 
-func NewVoteStrategy(publisher publisher.MessagePublisher, broadcaster websocket.Broadcaster, db *sql.DB) ProcessingStrategy {
-	return &QuizStrategy{
+func NewVoteStrategy(publisher publisher.MessagePublisher, broadcaster websocket.Broadcaster, repo *repository.VotingRepository) ProcessingStrategy {
+	return &VoteStrategy{
 		publisher:   publisher,
 		broadcaster: broadcaster,
-		db:          db,
+		repo:        repo,
 	}
 }
 
 func (vs *VoteStrategy) Process(clientID int64, message domain.SMSMessage, parsedDate time.Time) error {
 	const customDateFormat = "2006-01-02T15:04:05"
-	votingID, status, err := repository.GetVotingDetails(vs.db, message.Destination, parsedDate)
+	votingID, status, err := vs.repo.GetVotingDetails(message.Destination, parsedDate)
 	if err != nil {
 		return fmt.Errorf("Failed to find voting by short number and date: %w", err)
 	}
 
-	votingItemID, votingItemTitle, err := repository.GetVotingItemDetails(vs.db, votingID, message.Text)
+	votingItemID, votingItemTitle, err := vs.repo.GetVotingItemDetails(votingID, message.Text)
 	if err != nil {
 		return fmt.Errorf("Failed to find voting item by vote code: %w", err)
 	}
 
-	hasVoted, err := repository.HasClientVoted(vs.db, votingID, clientID, status, parsedDate)
+	hasVoted, err := vs.repo.HasClientVoted(votingID, clientID, status, parsedDate)
 	if err != nil {
 		return fmt.Errorf("Failed to check if client has voted: %w", err)
-	}
-	if hasVoted {
+	} else if hasVoted {
+		log.Printf("client has already Voted")
 		return nil
 	}
 
-	err = repository.InsertVotingMessageAndUpdateCount(vs.db, votingID, votingItemID, message.Text, parsedDate, clientID)
+	err = vs.repo.InsertVotingMessageAndUpdateCount(votingID, votingItemID, message.Text, parsedDate, clientID)
 	if err != nil {
 		return fmt.Errorf("Failed to insert voting message and update count: %w", err)
 	}

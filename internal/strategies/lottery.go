@@ -6,7 +6,6 @@ import (
 	"answers-processor/internal/infrastructure/rabbitmq/publisher"
 	"answers-processor/internal/repository"
 	"answers-processor/pkg/utils"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -16,14 +15,14 @@ import (
 type LotteryStrategy struct {
 	publisher   publisher.MessagePublisher
 	broadcaster websocket.Broadcaster
-	db          *sql.DB
+	repo        *repository.LotteryRepository
 }
 
-func NewLotteryStrategy(publisher publisher.MessagePublisher, broadcaster websocket.Broadcaster, db *sql.DB) ProcessingStrategy {
+func NewLotteryStrategy(publisher publisher.MessagePublisher, broadcaster websocket.Broadcaster, repo *repository.LotteryRepository) ProcessingStrategy {
 	return &LotteryStrategy{
 		publisher:   publisher,
 		broadcaster: broadcaster,
-		db:          db,
+		repo:        repo,
 	}
 }
 
@@ -31,7 +30,7 @@ func (ls *LotteryStrategy) Process(clientID int64, message domain.SMSMessage, pa
 	// Implementation of quiz processing logic
 	const customDateFormat = "2006-01-02T15:04:05"
 
-	id, code, answer, err := repository.GetLotteryByShortNumber(ls.db, message.Destination, parsedDate)
+	id, code, answer, err := ls.repo.GetLotteryByShortNumber(message.Destination, parsedDate)
 	if err != nil {
 		return fmt.Errorf("Failed to find lot by short number and date: %w", err)
 	}
@@ -43,7 +42,7 @@ func (ls *LotteryStrategy) Process(clientID int64, message domain.SMSMessage, pa
 		//todo insert lottery item bradcast
 		starredSrc := utils.StarMiddleDigits(message.Source)
 
-		err = repository.InsertLotteryMessageAndUpdate(ls.db, id, message.Text, parsedDate, clientID)
+		err = ls.repo.InsertLotteryMessageAndUpdate(id, message.Text, parsedDate, clientID)
 		if err != nil {
 			return fmt.Errorf("Failed to insert lottery message and update: %w", err)
 		}

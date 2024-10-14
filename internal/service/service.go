@@ -28,10 +28,10 @@ func NewService(db *sql.DB, publisher publisher.MessagePublisher, wsServer webso
 	}
 
 	// Initialize strategies
-	s.strategies["quiz"] = strategies.NewQuizStrategy(publisher, wsServer, db)
-	s.strategies["voting"] = strategies.NewVoteStrategy(publisher, wsServer, db)
-	s.strategies["shop"] = strategies.NewShopStrategy(publisher, wsServer, db)
-	s.strategies["lottery"] = strategies.NewLotteryStrategy(publisher, wsServer, db)
+	s.strategies["quiz"] = strategies.NewQuizStrategy(publisher, wsServer, &repository.QuizRepository{DB: db})
+	s.strategies["voting"] = strategies.NewVoteStrategy(publisher, wsServer, &repository.VotingRepository{DB: db})
+	s.strategies["shop"] = strategies.NewShopStrategy(publisher, wsServer, &repository.ShopRepository{DB: db})
+	s.strategies["lottery"] = strategies.NewLotteryStrategy(publisher, wsServer, &repository.LotteryRepository{DB: db})
 	return s
 }
 

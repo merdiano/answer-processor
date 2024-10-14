@@ -1,6 +1,15 @@
 package repository
 
-import "database/sql"
+import (
+	"answers-processor/pkg/logger"
+	"database/sql"
+)
+
+var loggers *logger.Loggers
+
+func Init(logInstance *logger.Loggers) {
+	loggers = logInstance
+}
 
 func GetAccountType(db *sql.DB, shortNumber string) (string, error) {
 	var accountType string

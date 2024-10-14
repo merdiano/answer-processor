@@ -6,7 +6,6 @@ import (
 	"answers-processor/internal/infrastructure/rabbitmq/publisher"
 	"answers-processor/internal/repository"
 	"answers-processor/pkg/utils"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -16,14 +15,14 @@ import (
 type QuizStrategy struct {
 	publisher   publisher.MessagePublisher
 	broadcaster websocket.Broadcaster
-	db          *sql.DB
+	repo        *repository.QuizRepository
 }
 
-func NewQuizStrategy(publisher publisher.MessagePublisher, broadcaster websocket.Broadcaster, db *sql.DB) ProcessingStrategy {
+func NewQuizStrategy(publisher publisher.MessagePublisher, broadcaster websocket.Broadcaster, repo *repository.QuizRepository) ProcessingStrategy {
 	return &QuizStrategy{
 		publisher:   publisher,
 		broadcaster: broadcaster,
-		db:          db,
+		repo:        repo,
 	}
 }
 
@@ -32,7 +31,7 @@ func (qs *QuizStrategy) Process(clientID int64, message domain.SMSMessage, parse
 	text := message.Text
 
 	// _, questions, questionIDs, quizID, err := repository.GetAccountAndQuestions(qs.db, destination, parsedDate)
-	questionInfo, err := repository.GetQuestionAndScoringInfo(qs.db, message.Destination, parsedDate, clientID)
+	questionInfo, err := qs.repo.GetQuestionAndScoringInfo(message.Destination, parsedDate, clientID)
 	if err != nil {
 		return fmt.Errorf("Failed to find quiz and questions: %w", err)
 	}
@@ -41,7 +40,7 @@ func (qs *QuizStrategy) Process(clientID int64, message domain.SMSMessage, parse
 	const customDateFormat = "2006-01-02T15:04:05"
 	if isCorrect && !questionInfo.HasScored {
 
-		err = repository.InsertAnswer(qs.db, questionInfo.ID, text, parsedDate, clientID, questionInfo.Score, questionInfo.NextSerialNumber, questionInfo.NextSerialNumberForCorrect)
+		err = qs.repo.InsertAnswer(questionInfo.ID, text, parsedDate, clientID, questionInfo.Score, questionInfo.NextSerialNumber, questionInfo.NextSerialNumberForCorrect)
 		if err != nil {
 			return fmt.Errorf("Failed to insert answer: %w", err)
 		}
@@ -66,14 +65,14 @@ func (qs *QuizStrategy) Process(clientID int64, message domain.SMSMessage, parse
 		}
 
 	} else {
-		incorrectAnswerCount, err := repository.GetIncorrectAnswerCount(qs.db, questionInfo.ID, clientID)
+		incorrectAnswerCount, err := qs.repo.GetIncorrectAnswerCount(questionInfo.ID, clientID)
 		if err != nil {
 			//qs.service.LogInstance.ErrorLogger.Error("Failed to get incorrect answer count", "error", err)
 			return fmt.Errorf("Failed to get incorrect answer count: %w", err)
 		}
 
 		if incorrectAnswerCount == 0 {
-			err = repository.InsertAnswer(qs.db, questionInfo.ID, text, parsedDate, clientID, 0, questionInfo.NextSerialNumber, questionInfo.NextSerialNumberForCorrect)
+			err = qs.repo.InsertAnswer(questionInfo.ID, text, parsedDate, clientID, 0, questionInfo.NextSerialNumber, questionInfo.NextSerialNumberForCorrect)
 			if err != nil {
 				return fmt.Errorf("Failed to insert answer: %w", err)
 			}
