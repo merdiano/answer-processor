@@ -62,9 +62,7 @@ func (server *WebSocketServer) HandleConnections(w http.ResponseWriter, r *http.
 
 // readPump reads messages from the WebSocket connection.
 func (server *WebSocketServer) readPump(conn *websocket.Conn, dst string) {
-	defer func() {
-		server.cleanupConnection(conn, dst)
-	}()
+	defer server.cleanupConnection(conn, dst)
 
 	for {
 		_, _, err := conn.ReadMessage()
@@ -78,8 +76,8 @@ func (server *WebSocketServer) readPump(conn *websocket.Conn, dst string) {
 // cleanupConnection handles the removal and logging of a disconnected WebSocket connection.
 func (server *WebSocketServer) cleanupConnection(conn *websocket.Conn, dst string) {
 	server.mu.Lock()
+	defer server.mu.Unlock()
 	delete(server.clients, conn)
-	server.mu.Unlock()
 	conn.Close()
 	server.Log.InfoLogger.Info("Client disconnected", "dst", dst)
 }
@@ -87,23 +85,33 @@ func (server *WebSocketServer) cleanupConnection(conn *websocket.Conn, dst strin
 // HandleMessages listens for messages on the broadcast channel and sends them to clients.
 func (server *WebSocketServer) HandleMessages() {
 	for broadcastMessage := range server.broadcast {
+		var clientsToNotify []*websocket.Conn
+		// Collect clients to notify while holding the lock
 		server.mu.Lock()
 		for client, dst := range server.clients {
 			if dst == broadcastMessage.Dst {
-				err := client.WriteMessage(websocket.TextMessage, broadcastMessage.Message)
-				if err != nil {
-					server.Log.ErrorLogger.Error("Failed to write message to client, closing connection", "dst", dst, "error", err)
-					server.cleanupConnection(client, dst)
-				}
+				clientsToNotify = append(clientsToNotify, client)
 			}
 		}
 		server.mu.Unlock()
+		// Send messages to clients outside the critical section
+		for _, client := range clientsToNotify {
+			go func(c *websocket.Conn) {
+				if err := c.WriteMessage(websocket.TextMessage, broadcastMessage.Message); err != nil {
+					server.Log.ErrorLogger.Error("Failed to write message to client, closing connection", "dst", broadcastMessage.Dst, "error", err)
+					server.cleanupConnection(c, broadcastMessage.Dst)
+				}
+			}(client)
+		}
+
 	}
 }
 
 // Broadcast sends a message to the broadcast channel.
 func (server *WebSocketServer) Broadcast(dst string, message []byte) {
-	server.broadcast <- BroadcastMessage{Dst: dst, Message: message}
+	go func() {
+		server.broadcast <- BroadcastMessage{Dst: dst, Message: message}
+	}()
 }
 
 // Shutdown gracefully closes all WebSocket connections
@@ -112,8 +120,7 @@ func (server *WebSocketServer) Shutdown() {
 	defer server.mu.Unlock()
 
 	for client := range server.clients {
-		err := client.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Server shutting down"))
-		if err != nil {
+		if err := client.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Server shutting down")); err != nil {
 			server.Log.ErrorLogger.Error("Error sending close message", "error", err)
 		}
 		client.Close()
